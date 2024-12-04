@@ -1,25 +1,35 @@
-const { test, after, beforeEach } = require('node:test')
+const { test, after, before, beforeEach } = require('node:test')
 const assert = require('node:assert')
 const mongoose = require('mongoose')
 const supertest = require('supertest')
 const app = require('../app')
 const api = supertest(app)
+const jwt = require('jsonwebtoken')
 
 const Blog = require('../models/blog')
+const User = require('../models/user')
 
 const initialBlogs = [
     { title: 'Blog 1', author: 'Author 1', url: 'http://example1.com', likes: 5 },
     { title: 'Blog 2', author: 'Author 2', url: 'http://example2.com', likes: 10 }
 ]
 
+let token
+
+before(async () => {
+    await User.deleteMany({})
+    const user = { username: 'testuser', password: 'password' }
+    await api.post('/api/users').send(user)
+    const loginResponse = await api.post('/api/login').send(user)
+    token = loginResponse.body.token
+})
+
 beforeEach(async () => {
     await Blog.deleteMany({})
-
-    let blogObject = new Blog(initialBlogs[0])
-    await blogObject.save()
-
-    blogObject = new Blog(initialBlogs[1])
-    await blogObject.save()
+    const user = await User.findOne({ username: 'testuser' })
+    const blogObjects = initialBlogs.map(blog => new Blog({ ...blog, user: user._id }))
+    const promiseArray = blogObjects.map(blog => blog.save())
+    await Promise.all(promiseArray)
 })
 
 test('blogs are returned as json', async () => {
@@ -43,27 +53,44 @@ test('identifier is named "id"', async () => {
     })
 })
 
-test('a valid blog can be added', async () => {
+test('a valid blog can be added with a token', async () => {
     const newBlog = {
-      title: 'New Blog',
-      author: 'New Author',
-      url: 'http://newblog.com',
-      likes: 15
+      title: 'Testing blog creation',
+      author: 'Test Author',
+      url: 'http://test.com',
+      likes: 5
+    }
+  
+    await api
+      .post('/api/blogs')
+      .set('Authorization', `Bearer ${token}`)
+      .send(newBlog)
+      .expect(201)
+      .expect('Content-Type', /application\/json/)
+
+    const response = await api.get('/api/blogs')
+    const titles = response.body.map(r => r.title)
+    assert.strictEqual(response.body.length, initialBlogs.length + 1)
+    assert(titles.includes('Testing blog creation'))
+})
+
+test('adding a blog fails with 401 if token is missing', async () => {
+    const newBlog = {
+      title: 'Unauthorized Blog',
+      author: 'Test Author',
+      url: 'http://unauthorized.com',
+      likes: 3
     }
   
     await api
       .post('/api/blogs')
       .send(newBlog)
-      .expect(201)
+      .expect(401)
       .expect('Content-Type', /application\/json/)
     
     const response = await api.get('/api/blogs')
-    const titles = response.body.map(r => r.title)
-    
-    assert.strictEqual(response.body.length, initialBlogs.length + 1)
-
-    assert(titles.includes('New Blog'))
-})
+    assert.strictEqual(response.body.length, initialBlogs.length)
+  })
 
 test('likes default to 0 if missing', async () => {
     const testBlog = {
@@ -74,6 +101,7 @@ test('likes default to 0 if missing', async () => {
 
     const response = await api
         .post('/api/blogs')
+        .set('Authorization', `Bearer ${token}`)
         .send(testBlog)
         .expect(201)
         .expect('Content-Type', /application\/json/)
@@ -105,12 +133,14 @@ test('blog without url is not added', async () => {
         .expect(400)
 })
 
+
 test('blog can be deleted', async () => {
     const blogsAtStart = await api.get('/api/blogs')
     const blogToDelete = blogsAtStart.body[0]
 
     await api
         .delete(`/api/blogs/${blogToDelete.id}`)
+        .set('Authorization', `Bearer ${token}`)
         .expect(204)
 
     const blogsAtEnd = await api.get('/api/blogs')
